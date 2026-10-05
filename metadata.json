@@ -1,0 +1,6 @@
+{
+  "name": "FoodSphere – Multi-Tenant Food Business Management",
+  "description": "Cloud-based multi-tenant SaaS platform for restaurants, cafes, bakeries, and cloud kitchens featuring ordering, reservations, menu management, and real-time analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
