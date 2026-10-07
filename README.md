@@ -50,13 +50,54 @@ FoodSphere is a production-quality, multi-tenant Software-as-a-Service (SaaS) cl
 
 ---
 
-## 4. Multi-Tenancy Architecture
+## 4. Multi-Tenancy & MongoDB Atlas Architecture
 
-In FoodSphere, data isolation is enforced at the database query and API authorization level:
+In FoodSphere, data isolation and cloud storage are powered directly by **MongoDB Atlas**:
 
-1. **Authentication Layer**: When a user logs in, their JWT payload contains their `tenantId` (e.g. `biz_artisanal_fork`).
-2. **Middleware Layer**: The `requireTenant` middleware extracts the session tenant ID. If an owner or staff attempts to query or mutate an entity belonging to another `tenantId`, the server returns `403 Forbidden` or `404 Not Found`.
-3. **Database Layer**: Every write (`createCategory`, `createMenuItem`, `createOrder`, `getBusinessAnalytics`) mandates a matching `tenantId`.
+1. **Authentication Layer & Separate User Accounts**:
+   - Each user (Platform Super Admin, Tenant A Owner, Tenant A Staff, Tenant B Owner, Tenant B Staff, Customer, or new signups) is stored as a distinct document in the MongoDB Atlas `users` collection.
+   - Separate credentials with bcrypt salted password hashes.
+   - Unique index on `email`: `{ email: 1 }`.
+   - Each business staff and owner has their corresponding `tenantId` bound to their user record.
+2. **Business Tenant System**:
+   - Business records are stored in the `businesses` collection with unique `slug` index and `ownerId`.
+   - Every business entity (`categories`, `menuItems`, `orders`, `reservations`, `tables`, `notifications`) contains an immutable `tenantId`.
+3. **MongoDB Atlas Collections & Indexes**:
+   - `users`: `{ email: 1 }` (unique), `{ tenantId: 1 }`, `{ role: 1 }`
+   - `businesses`: `{ slug: 1 }` (unique), `{ ownerId: 1 }`
+   - `categories`: `{ tenantId: 1, displayOrder: 1 }`
+   - `menuItems`: `{ tenantId: 1, categoryId: 1 }`, `{ tenantId: 1, available: 1 }`
+   - `orders`: `{ tenantId: 1, createdAt: -1 }`, `{ customerId: 1 }`, `{ id: 1 }` (unique)
+   - `reservations`: `{ tenantId: 1, date: 1 }`, `{ customerId: 1 }`
+   - `tables`: `{ tenantId: 1, tableNumber: 1 }`
+   - `notifications`: `{ userId: 1 }`, `{ tenantId: 1 }`
+4. **Middleware Layer**:
+   - The `requireTenant` middleware extracts the session tenant ID. If an owner or staff attempts to query or mutate an entity belonging to another `tenantId`, the server returns `403 Forbidden` or `404 Not Found`.
+
+---
+
+## 5. Setting up MongoDB Atlas Cloud Database
+
+You can connect FoodSphere to your own **MongoDB Atlas** cloud cluster in 3 easy steps:
+
+### Step 1: Create Free MongoDB Atlas Cluster
+1. Log in to [MongoDB Atlas](https://www.mongodb.com/cloud/atlas).
+2. Create a free shared cluster (e.g. `Cluster0`).
+3. Under **Security → Database Access**, create a user (e.g. `admin`) and set a password.
+4. Under **Security → Network Access**, add IP `0.0.0.0/0` (Allow Access from Anywhere) so cloud environments can connect.
+
+### Step 2: Get your Connection String
+Click **Connect → Drivers** and copy your URI:
+```
+mongodb+srv://<username>:<password>@cluster0.abcde.mongodb.net/foodsphere?retryWrites=true&w=majority
+```
+
+### Step 3: Connect in FoodSphere
+You can connect in either of two ways:
+1. **Via the In-App Console**: Click the **"MongoDB Atlas"** pill on the top demo bar, paste your connection string, and click **"Test & Connect Atlas Cluster"**.
+2. **Via `.env`**: Set `MONGODB_URI="your_mongodb_atlas_uri"` in `.env` and restart the server.
+
+Once connected, FoodSphere automatically verifies indexes, seeds the cluster with multi-tenant data, and reflects live document counts!
 
 ---
 

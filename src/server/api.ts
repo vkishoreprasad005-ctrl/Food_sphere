@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { db } from './db.ts';
+import { mongoManager } from './mongo.ts';
 import {
   hashPassword,
   comparePassword,
@@ -820,10 +821,70 @@ apiRouter.get('/events', (req: Request, res: Response) => {
 });
 
 // ==========================================
-// 10. DATABASE RESET (FOR TEST & DEMO)
+// 10. DATABASE RESET & MONGODB ATLAS CLOUD ENDPOINTS
 // ==========================================
 
-apiRouter.post('/seed/reset', (req: Request, res: Response) => {
-  db.resetDatabase();
+apiRouter.get('/database/status', async (req: Request, res: Response) => {
+  const status = await mongoManager.getDetailedStatus();
+  return res.json(status);
+});
+
+apiRouter.post('/database/connect', async (req: Request, res: Response) => {
+  const { uri } = req.body;
+  if (!uri || !uri.trim()) {
+    return res.status(400).json({ error: 'MongoDB connection string (URI) is required' });
+  }
+
+  const success = await mongoManager.connect(uri.trim());
+  if (!success) {
+    const status = mongoManager.getStatus();
+    return res.status(400).json({
+      error: status.error || 'Failed to connect to MongoDB Atlas cluster',
+      hint: 'Ensure your MongoDB Atlas Database User credentials are correct, and your IP Address is whitelisted in Atlas Network Access (e.g. 0.0.0.0/0).',
+    });
+  }
+
+  // Seed or sync if empty
+  await db.syncToMongoAtlas().catch(() => {});
+  const status = await mongoManager.getDetailedStatus();
+
+  return res.json({
+    success: true,
+    message: 'Successfully connected to MongoDB Atlas cloud database!',
+    status,
+  });
+});
+
+apiRouter.post('/database/sync-atlas', async (req: Request, res: Response) => {
+  try {
+    await db.syncToMongoAtlas();
+    const status = await mongoManager.getDetailedStatus();
+    return res.json({
+      success: true,
+      message: 'All application data (users, businesses, menus, orders, tables) synchronized to MongoDB Atlas.',
+      status,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to sync to MongoDB Atlas' });
+  }
+});
+
+apiRouter.post('/database/sync-from-atlas', async (req: Request, res: Response) => {
+  try {
+    await db.syncFromMongoAtlas();
+    const status = await mongoManager.getDetailedStatus();
+    return res.json({
+      success: true,
+      message: 'Refreshed local cache with records from MongoDB Atlas cluster.',
+      status,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to pull from MongoDB Atlas' });
+  }
+});
+
+apiRouter.post('/seed/reset', async (req: Request, res: Response) => {
+  await db.resetDatabase();
   return res.json({ success: true, message: 'Database reset to initial demo seeds.' });
 });
+

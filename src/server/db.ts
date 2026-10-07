@@ -23,6 +23,7 @@ import {
   SEED_RESERVATIONS,
   SEED_NOTIFICATIONS,
 } from './seedData.ts';
+import { mongoManager } from './mongo.ts';
 
 export interface DatabaseSchema {
   users: (User & { passwordHash: string })[];
@@ -44,6 +45,19 @@ class DatabaseManager {
 
   constructor() {
     this.data = this.loadOrSeed();
+    this.initMongoBackground();
+  }
+
+  private async initMongoBackground() {
+    try {
+      const connected = await mongoManager.initialize();
+      if (connected) {
+        console.log('[Database] MongoDB Atlas active. Synchronizing seed documents if cluster is empty...');
+        await mongoManager.seedAtlasIfEmpty(this.data);
+      }
+    } catch (e) {
+      console.warn('[Database] Background Mongo initialization note:', e);
+    }
   }
 
   private loadOrSeed(): DatabaseSchema {
@@ -85,7 +99,95 @@ class DatabaseManager {
     }
   }
 
-  public resetDatabase() {
+  public async syncToMongoAtlas() {
+    const mongoDb = mongoManager.getDb();
+    if (!mongoDb) {
+      throw new Error('MongoDB Atlas is not currently connected. Please configure your MONGODB_URI.');
+    }
+
+    // Upsert / replace all collections in Atlas
+    const collections = [
+      { name: 'users', data: this.data.users, key: 'id' },
+      { name: 'businesses', data: this.data.businesses, key: 'id' },
+      { name: 'categories', data: this.data.categories, key: 'id' },
+      { name: 'menuItems', data: this.data.menuItems, key: 'id' },
+      { name: 'tables', data: this.data.tables, key: 'id' },
+      { name: 'orders', data: this.data.orders, key: 'id' },
+      { name: 'reservations', data: this.data.reservations, key: 'id' },
+      { name: 'notifications', data: this.data.notifications, key: 'id' },
+    ];
+
+    for (const col of collections) {
+      const collection = mongoDb.collection(col.name);
+      for (const item of col.data as any[]) {
+        await collection.updateOne(
+          { id: item.id },
+          { $set: item },
+          { upsert: true }
+        );
+      }
+    }
+
+    return true;
+  }
+
+  public async syncFromMongoAtlas() {
+    const mongoDb = mongoManager.getDb();
+    if (!mongoDb) {
+      throw new Error('MongoDB Atlas is not connected.');
+    }
+
+    const [
+      users,
+      businesses,
+      categories,
+      menuItems,
+      tables,
+      orders,
+      reservations,
+      notifications,
+    ] = await Promise.all([
+      mongoDb.collection('users').find().toArray(),
+      mongoDb.collection('businesses').find().toArray(),
+      mongoDb.collection('categories').find().toArray(),
+      mongoDb.collection('menuItems').find().toArray(),
+      mongoDb.collection('tables').find().toArray(),
+      mongoDb.collection('orders').find().toArray(),
+      mongoDb.collection('reservations').find().toArray(),
+      mongoDb.collection('notifications').find().toArray(),
+    ]);
+
+    if (users.length > 0) {
+      this.data.users = users.map(({ _id, ...u }: any) => u);
+    }
+    if (businesses.length > 0) {
+      this.data.businesses = businesses.map(({ _id, ...b }: any) => b);
+    }
+    if (categories.length > 0) {
+      this.data.categories = categories.map(({ _id, ...c }: any) => c);
+    }
+    if (menuItems.length > 0) {
+      this.data.menuItems = menuItems.map(({ _id, ...m }: any) => m);
+    }
+    if (tables.length > 0) {
+      this.data.tables = tables.map(({ _id, ...t }: any) => t);
+    }
+    if (orders.length > 0) {
+      this.data.orders = orders.map(({ _id, ...o }: any) => o);
+    }
+    if (reservations.length > 0) {
+      this.data.reservations = reservations.map(({ _id, ...r }: any) => r);
+    }
+    if (notifications.length > 0) {
+      this.data.notifications = notifications.map(({ _id, ...n }: any) => n);
+    }
+
+    this.saveData();
+    this.broadcast({ type: 'DATABASE_UPDATED', payload: null });
+    return true;
+  }
+
+  public async resetDatabase() {
     this.data = {
       users: [...SEED_USERS],
       businesses: [...SEED_BUSINESSES],
@@ -97,6 +199,28 @@ class DatabaseManager {
       notifications: [...SEED_NOTIFICATIONS],
     };
     this.saveData();
+
+    // Reset in Atlas as well if connected
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      try {
+        await Promise.all([
+          mongoDb.collection('users').deleteMany({}),
+          mongoDb.collection('businesses').deleteMany({}),
+          mongoDb.collection('categories').deleteMany({}),
+          mongoDb.collection('menuItems').deleteMany({}),
+          mongoDb.collection('tables').deleteMany({}),
+          mongoDb.collection('orders').deleteMany({}),
+          mongoDb.collection('reservations').deleteMany({}),
+          mongoDb.collection('notifications').deleteMany({}),
+        ]);
+        await this.syncToMongoAtlas();
+        console.log('[MongoDB Atlas] Seed data re-synchronized into Atlas.');
+      } catch (err) {
+        console.warn('[MongoDB Atlas] Note while resetting Atlas:', err);
+      }
+    }
+
     this.broadcast({ type: 'DATABASE_RESET', payload: null });
     return this.data;
   }
@@ -135,6 +259,15 @@ class DatabaseManager {
   public createUser(user: User & { passwordHash: string }) {
     this.data.users.push(user);
     this.saveData();
+
+    // Async write to Atlas
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('users').insertOne({ ...user }).catch(err => {
+        console.warn('[MongoDB Atlas] Error inserting user into Atlas:', err);
+      });
+    }
+
     const { passwordHash, ...safeUser } = user;
     return safeUser;
   }
@@ -144,6 +277,12 @@ class DatabaseManager {
     if (idx === -1) return null;
     this.data.users[idx] = { ...this.data.users[idx], ...updates, updatedAt: new Date().toISOString() };
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('users').updateOne({ id }, { $set: updates }).catch(() => {});
+    }
+
     const { passwordHash, ...safeUser } = this.data.users[idx];
     return safeUser;
   }
@@ -167,6 +306,12 @@ class DatabaseManager {
   public createBusiness(biz: Business) {
     this.data.businesses.push(biz);
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('businesses').insertOne({ ...biz }).catch(() => {});
+    }
+
     this.broadcast({ type: 'BUSINESS_CREATED', payload: biz });
     return biz;
   }
@@ -176,6 +321,12 @@ class DatabaseManager {
     if (idx === -1) return null;
     this.data.businesses[idx] = { ...this.data.businesses[idx], ...updates, updatedAt: new Date().toISOString() };
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('businesses').updateOne({ id }, { $set: updates }).catch(() => {});
+    }
+
     this.broadcast({ type: 'BUSINESS_UPDATED', payload: this.data.businesses[idx], tenantId: id });
     return this.data.businesses[idx];
   }
@@ -190,6 +341,12 @@ class DatabaseManager {
   public createCategory(cat: MenuCategory) {
     this.data.categories.push(cat);
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('categories').insertOne({ ...cat }).catch(() => {});
+    }
+
     return cat;
   }
 
@@ -198,15 +355,27 @@ class DatabaseManager {
     if (idx === -1) return null;
     this.data.categories[idx] = { ...this.data.categories[idx], ...updates };
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('categories').updateOne({ id, tenantId }, { $set: updates }).catch(() => {});
+    }
+
     return this.data.categories[idx];
   }
 
   public deleteCategory(id: string, tenantId: string) {
     const initialLen = this.data.categories.length;
     this.data.categories = this.data.categories.filter(c => !(c.id === id && c.tenantId === tenantId));
-    // Also remove items belonging to this category under this tenant
     this.data.menuItems = this.data.menuItems.filter(item => !(item.categoryId === id && item.tenantId === tenantId));
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('categories').deleteOne({ id, tenantId }).catch(() => {});
+      mongoDb.collection('menuItems').deleteMany({ categoryId: id, tenantId }).catch(() => {});
+    }
+
     return this.data.categories.length < initialLen;
   }
 
@@ -226,6 +395,12 @@ class DatabaseManager {
   public createMenuItem(item: MenuItem) {
     this.data.menuItems.push(item);
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('menuItems').insertOne({ ...item }).catch(() => {});
+    }
+
     return item;
   }
 
@@ -234,6 +409,12 @@ class DatabaseManager {
     if (idx === -1) return null;
     this.data.menuItems[idx] = { ...this.data.menuItems[idx], ...updates, updatedAt: new Date().toISOString() };
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('menuItems').updateOne({ id, tenantId }, { $set: updates }).catch(() => {});
+    }
+
     return this.data.menuItems[idx];
   }
 
@@ -241,6 +422,12 @@ class DatabaseManager {
     const initialLen = this.data.menuItems.length;
     this.data.menuItems = this.data.menuItems.filter(i => !(i.id === id && i.tenantId === tenantId));
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('menuItems').deleteOne({ id, tenantId }).catch(() => {});
+    }
+
     return this.data.menuItems.length < initialLen;
   }
 
@@ -252,6 +439,12 @@ class DatabaseManager {
   public createTable(table: RestaurantTable) {
     this.data.tables.push(table);
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('tables').insertOne({ ...table }).catch(() => {});
+    }
+
     return table;
   }
 
@@ -260,6 +453,12 @@ class DatabaseManager {
     if (idx === -1) return null;
     this.data.tables[idx] = { ...this.data.tables[idx], ...updates };
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('tables').updateOne({ id, tenantId }, { $set: updates }).catch(() => {});
+    }
+
     return this.data.tables[idx];
   }
 
@@ -267,6 +466,12 @@ class DatabaseManager {
     const initialLen = this.data.tables.length;
     this.data.tables = this.data.tables.filter(t => !(t.id === id && t.tenantId === tenantId));
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('tables').deleteOne({ id, tenantId }).catch(() => {});
+    }
+
     return this.data.tables.length < initialLen;
   }
 
@@ -294,7 +499,6 @@ class DatabaseManager {
 
   public createOrder(order: Order) {
     this.data.orders.unshift(order);
-    // Auto-create notification for the business
     const notif: AppNotification = {
       id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       tenantId: order.tenantId,
@@ -309,7 +513,13 @@ class DatabaseManager {
     this.data.notifications.unshift(notif);
     this.saveData();
 
-    // Broadcast live event
+    // Persist to MongoDB Atlas
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('orders').insertOne({ ...order }).catch(() => {});
+      mongoDb.collection('notifications').insertOne({ ...notif }).catch(() => {});
+    }
+
     this.broadcast({ type: 'ORDER_CREATED', payload: order, tenantId: order.tenantId });
     return order;
   }
@@ -320,7 +530,6 @@ class DatabaseManager {
     this.data.orders[idx].orderStatus = status;
     this.data.orders[idx].updatedAt = new Date().toISOString();
 
-    // Notify customer
     const order = this.data.orders[idx];
     if (order.customerId) {
       const notif: AppNotification = {
@@ -336,9 +545,20 @@ class DatabaseManager {
         createdAt: new Date().toISOString(),
       };
       this.data.notifications.unshift(notif);
+
+      const mongoDb = mongoManager.getDb();
+      if (mongoDb) {
+        mongoDb.collection('notifications').insertOne({ ...notif }).catch(() => {});
+      }
     }
 
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('orders').updateOne({ id, tenantId }, { $set: { orderStatus: status, updatedAt: new Date().toISOString() } }).catch(() => {});
+    }
+
     this.broadcast({ type: 'ORDER_UPDATED', payload: order, tenantId });
     return order;
   }
@@ -358,7 +578,6 @@ class DatabaseManager {
 
   public createReservation(res: Reservation) {
     this.data.reservations.unshift(res);
-    // Notification for business
     const notif: AppNotification = {
       id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       tenantId: res.tenantId,
@@ -372,6 +591,12 @@ class DatabaseManager {
     };
     this.data.notifications.unshift(notif);
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('reservations').insertOne({ ...res }).catch(() => {});
+      mongoDb.collection('notifications').insertOne({ ...notif }).catch(() => {});
+    }
 
     this.broadcast({ type: 'RESERVATION_CREATED', payload: res, tenantId: res.tenantId });
     return res;
@@ -400,9 +625,23 @@ class DatabaseManager {
         createdAt: new Date().toISOString(),
       };
       this.data.notifications.unshift(notif);
+
+      const mongoDb = mongoManager.getDb();
+      if (mongoDb) {
+        mongoDb.collection('notifications').insertOne({ ...notif }).catch(() => {});
+      }
     }
 
     this.saveData();
+
+    const mongoDb = mongoManager.getDb();
+    if (mongoDb) {
+      mongoDb.collection('reservations').updateOne(
+        { id, tenantId },
+        { $set: { status, tableId, tableNumber, updatedAt: new Date().toISOString() } }
+      ).catch(() => {});
+    }
+
     this.broadcast({ type: 'RESERVATION_UPDATED', payload: reservation, tenantId });
     return reservation;
   }
@@ -460,6 +699,11 @@ class DatabaseManager {
     if (notif) {
       notif.read = true;
       this.saveData();
+
+      const mongoDb = mongoManager.getDb();
+      if (mongoDb) {
+        mongoDb.collection('notifications').updateOne({ id }, { $set: { read: true } }).catch(() => {});
+      }
       return true;
     }
     return false;
@@ -564,3 +808,4 @@ class DatabaseManager {
 }
 
 export const db = new DatabaseManager();
+

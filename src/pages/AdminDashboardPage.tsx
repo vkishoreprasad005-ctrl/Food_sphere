@@ -3,6 +3,7 @@ import { PlatformStats, Business, User } from '../types/index.ts';
 import { apiRequest } from '../services/api.ts';
 import { useToast } from '../context/ToastContext.tsx';
 import { StatusBadge } from '../components/StatusBadge.tsx';
+import { MongoAtlasModal } from '../components/MongoAtlasModal.tsx';
 import {
   ShieldCheck,
   Store,
@@ -15,6 +16,8 @@ import {
   XCircle,
   AlertTriangle,
   ArrowUpRight,
+  Database,
+  Cloud,
 } from 'lucide-react';
 
 export const AdminDashboardPage: React.FC = () => {
@@ -26,18 +29,22 @@ export const AdminDashboardPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'businesses' | 'users'>('businesses');
   const [searchTerm, setSearchTerm] = useState('');
+  const [isMongoModalOpen, setIsMongoModalOpen] = useState(false);
+  const [mongoStatus, setMongoStatus] = useState<any>(null);
 
   const fetchAdminData = async () => {
     setIsLoading(true);
-    const [statsRes, bizRes, usersRes] = await Promise.all([
+    const [statsRes, bizRes, usersRes, mongoRes] = await Promise.all([
       apiRequest<PlatformStats>('/api/admin/stats'),
       apiRequest<(Business & { ownerName: string; ownerEmail: string })[]>('/api/admin/businesses'),
       apiRequest<any[]>('/api/admin/users'),
+      apiRequest('/api/database/status'),
     ]);
 
     if (statsRes.data) setStats(statsRes.data);
     if (bizRes.data) setBusinesses(bizRes.data);
     if (usersRes.data) setUsers(usersRes.data);
+    if (mongoRes.data) setMongoStatus(mongoRes.data);
     setIsLoading(false);
   };
 
@@ -165,6 +172,56 @@ export const AdminDashboardPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* MongoDB Atlas Cloud Service Bar */}
+      <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div
+            className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold ${
+              mongoStatus?.connected
+                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                : 'bg-zinc-800 text-zinc-400'
+            }`}
+          >
+            <Cloud className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-white text-sm">MongoDB Atlas Cloud Service</span>
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                  mongoStatus?.connected
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                    : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                }`}
+              >
+                {mongoStatus?.connected ? 'Atlas Cluster Live' : 'Local Fallback / Standby'}
+              </span>
+            </div>
+            <p className="text-xs text-zinc-400 mt-0.5 font-mono">
+              {mongoStatus?.clusterHost
+                ? `Cluster: ${mongoStatus.clusterHost} (DB: ${mongoStatus.databaseName})`
+                : 'Configure remote MongoDB Atlas URI to store all business and user records in the cloud.'}
+            </p>
+          </div>
+        </div>
+
+        <button
+          onClick={() => setIsMongoModalOpen(true)}
+          className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold rounded-xl text-xs transition-colors flex items-center gap-1.5 self-start sm:self-auto cursor-pointer"
+        >
+          <Database className="w-3.5 h-3.5" />
+          <span>MongoDB Atlas Console</span>
+        </button>
+      </div>
+
+      <MongoAtlasModal
+        isOpen={isMongoModalOpen}
+        onClose={() => {
+          setIsMongoModalOpen(false);
+          fetchAdminData();
+        }}
+      />
 
       {/* Search Input */}
       <div className="flex justify-between items-center bg-zinc-900/60 p-4 rounded-2xl border border-zinc-800">
